@@ -1,3 +1,9 @@
+# Install
+npm install --legacy-peer-deps
+npm install webpack-dev-server@3 webpack-cli@3 --save-dev --legacy-peer-deps
+npm start 
+
+
 # Ballooning with Three.js
 This was developed as a study into procedural terrains, buffer geometry optimisation and shadow mappers with Three.js and WebGL.
 I had some grand plans for the application, but they were never realised so it's probably more useful to just release it as it is for others to take a look!
