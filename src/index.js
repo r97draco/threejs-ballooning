@@ -102,7 +102,11 @@ import $ from "jquery";
     clock,
     _this,
     loadingMessage,
-    player;
+    player,
+    companionBalloons;
+
+  let companionYawEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  let companionOffsetWorld = new THREE.Vector3();
 
   // Boats
   const DEPTH_FOR_BOAT = -21;
@@ -796,14 +800,121 @@ import $ from "jquery";
   };
 
   /**
+   * Horizontal stripe bands (by local Y). Pass two {r,g,b} colours; defaults red / white.
+   */
+  let applyBalloonHorizontalStripes = function(root, stripeA, stripeB) {
+    const bands = 12;
+    const a = stripeA || { r: 0.9, g: 0.12, b: 0.16 };
+    const b = stripeB || { r: 0.98, g: 0.98, b: 0.98 };
+    root.traverse(function(child) {
+      if (!child.geometry || !child.geometry.attributes) {
+        return;
+      }
+      let posAttr = child.geometry.attributes.position;
+      let colAttr = child.geometry.attributes.color;
+      if (!posAttr || !colAttr) {
+        return;
+      }
+      let pos = posAttr.array;
+      let col = colAttr.array;
+      let n = pos.length / 3;
+      let yMin = Infinity;
+      let yMax = -Infinity;
+      for (let i = 0; i < n; i++) {
+        let y = pos[i * 3 + 1];
+        if (y < yMin) {
+          yMin = y;
+        }
+        if (y > yMax) {
+          yMax = y;
+        }
+      }
+      let span = yMax - yMin || 1;
+      for (let i = 0; i < n; i++) {
+        let y = pos[i * 3 + 1];
+        let t = (y - yMin) / span;
+        let stripe = Math.floor(t * bands) % 2 === 0;
+        let c = stripe ? a : b;
+        let j = i * 4;
+        col[j] = c.r;
+        col[j + 1] = c.g;
+        col[j + 2] = c.b;
+        col[j + 3] = 1;
+      }
+      colAttr.needsUpdate = true;
+    });
+  };
+
+  const PLAYER_STRIPE_A = { r: 0.9, g: 0.12, b: 0.16 };
+  const PLAYER_STRIPE_B = { r: 0.98, g: 0.98, b: 0.98 };
+
+  const COMPANION_STRIPE_PALETTES = [
+    [{ r: 0.12, g: 0.28, b: 0.62 }, { r: 0.96, g: 0.93, b: 0.85 }],
+    [{ r: 0.1, g: 0.45, b: 0.22 }, { r: 0.78, g: 0.92, b: 0.8 }],
+    [{ r: 0.95, g: 0.45, b: 0.08 }, { r: 0.99, g: 0.96, b: 0.88 }],
+    [{ r: 0.42, g: 0.15, b: 0.55 }, { r: 0.98, g: 0.82, b: 0.88 }],
+    [{ r: 0.05, g: 0.55, b: 0.52 }, { r: 0.94, g: 0.98, b: 1 }],
+    [{ r: 0.72, g: 0.52, b: 0.12 }, { r: 0.55, g: 0.72, b: 0.92 }],
+  ];
+
+  /**
+   * Extra balloons: separate scene objects that follow the player path but spin on their own.
+   * Offsets are chosen on a hex ring so envelopes stay separated (no random pile-up).
+   */
+  let initCompanionBalloons = function() {
+    companionBalloons = [];
+    const buddyCount = 6;
+    const ringRadius = 40 + random.range(0, 6);
+    const layoutYaw = random.range(0, Math.PI * 2);
+    companionYawEuler.set(0, layoutYaw, 0, "YXZ");
+    for (let i = 0; i < buddyCount; i++) {
+      let template = meshes["balloon"];
+      let geom = template.geometry.clone();
+      let mesh = new THREE.Mesh(geom, template.material);
+      let pal = COMPANION_STRIPE_PALETTES[i];
+      applyBalloonHorizontalStripes(mesh, pal[0], pal[1]);
+      let anchor = new THREE.Object3D();
+      anchor.add(mesh);
+      scene.add(anchor);
+      let a = (i / buddyCount) * Math.PI * 2;
+      companionOffsetWorld.set(
+        Math.cos(a) * ringRadius,
+        random.range(-5, 5),
+        Math.sin(a) * ringRadius,
+      );
+      companionOffsetWorld.applyEuler(companionYawEuler);
+      companionBalloons.push({
+        anchor,
+        offset: companionOffsetWorld.clone(),
+        spinRate: random.range(0.35, 1.1) * (random.range(0, 1) > 0.5 ? 1 : -1),
+      });
+    }
+  };
+
+  let updateCompanionBalloons = function(dt) {
+    if (!player || !companionBalloons) {
+      return;
+    }
+    companionYawEuler.y = player.rotation.y;
+    for (let i = 0; i < companionBalloons.length; i++) {
+      let c = companionBalloons[i];
+      companionOffsetWorld.copy(c.offset).applyEuler(companionYawEuler);
+      c.anchor.position.copy(player.position).add(companionOffsetWorld);
+      c.anchor.rotation.y += c.spinRate * dt;
+    }
+  };
+
+  /**
    * Create our balloon friend and add to scene.
    */
   let initPlayer = function() {
     let obj = meshes["balloon"];
+    applyBalloonHorizontalStripes(obj, PLAYER_STRIPE_A, PLAYER_STRIPE_B);
     player = new Player();
     player.position.set(0, 100, 0);
     player.add(obj);
     scene.add(player);
+    initCompanionBalloons();
   };
 
   /**
@@ -1023,6 +1134,7 @@ import $ from "jquery";
 
     if (player) {
       player.update();
+      updateCompanionBalloons(dt);
       player.gridPos = worldToTerrainGrid(player.position);
       // Check for terrain shift
       while (player.gridPos.y > terrainGridIndex.y) {
