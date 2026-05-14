@@ -108,6 +108,14 @@ import $ from "jquery";
   let companionYawEuler = new THREE.Euler(0, 0, 0, "YXZ");
   let companionOffsetWorld = new THREE.Vector3();
 
+  let fallingBalloons = [];
+  let balloonRaycaster = new THREE.Raycaster();
+  let balloonPointerNDC = new THREE.Vector2();
+  let balloonDetachPos = new THREE.Vector3();
+  let balloonDetachQuat = new THREE.Quaternion();
+  let balloonDetachScale = new THREE.Vector3();
+  let fallPhysicsDelta = new THREE.Vector3();
+
   // Boats
   const DEPTH_FOR_BOAT = -21;
 
@@ -887,6 +895,7 @@ import $ from "jquery";
         anchor,
         offset: companionOffsetWorld.clone(),
         spinRate: random.range(0.35, 1.1) * (random.range(0, 1) > 0.5 ? 1 : -1),
+        falling: false,
       });
     }
   };
@@ -898,9 +907,150 @@ import $ from "jquery";
     companionYawEuler.y = player.rotation.y;
     for (let i = 0; i < companionBalloons.length; i++) {
       let c = companionBalloons[i];
+      if (c.falling) {
+        continue;
+      }
       companionOffsetWorld.copy(c.offset).applyEuler(companionYawEuler);
       c.anchor.position.copy(player.position).add(companionOffsetWorld);
       c.anchor.rotation.y += c.spinRate * dt;
+    }
+  };
+
+  let collectPickableBalloonMeshes = function() {
+    let list = [];
+    if (player && player.children) {
+      for (let i = 0; i < player.children.length; i++) {
+        let ch = player.children[i];
+        if (ch instanceof THREE.Mesh && !ch.userData.isFalling) {
+          list.push(ch);
+        }
+      }
+    }
+    if (companionBalloons) {
+      for (let i = 0; i < companionBalloons.length; i++) {
+        let c = companionBalloons[i];
+        if (c.falling) {
+          continue;
+        }
+        let anchor = c.anchor;
+        for (let j = 0; j < anchor.children.length; j++) {
+          let ch = anchor.children[j];
+          if (ch instanceof THREE.Mesh && !ch.userData.isFalling) {
+            list.push(ch);
+          }
+        }
+      }
+    }
+    return list;
+  };
+
+  let detachBalloonMeshToScene = function(mesh) {
+    mesh.updateMatrixWorld(true);
+    mesh.matrixWorld.decompose(
+      balloonDetachPos,
+      balloonDetachQuat,
+      balloonDetachScale,
+    );
+    if (mesh.parent) {
+      mesh.parent.remove(mesh);
+    }
+    scene.add(mesh);
+    mesh.position.copy(balloonDetachPos);
+    mesh.quaternion.copy(balloonDetachQuat);
+    mesh.scale.copy(balloonDetachScale);
+  };
+
+  let markCompanionFallingIfMesh = function(mesh) {
+    if (!companionBalloons) {
+      return;
+    }
+    for (let i = 0; i < companionBalloons.length; i++) {
+      let c = companionBalloons[i];
+      if (c.anchor && c.anchor.children[0] === mesh) {
+        c.falling = true;
+        return;
+      }
+    }
+  };
+
+  let startBalloonFall = function(mesh) {
+    if (!mesh || mesh.userData.isFalling) {
+      return;
+    }
+    mesh.userData.isFalling = true;
+    markCompanionFallingIfMesh(mesh);
+    detachBalloonMeshToScene(mesh);
+    let velocity = new THREE.Vector3(
+      random.range(-16, 16),
+      random.range(-28, -10),
+      random.range(-22, 14),
+    );
+    let angularVel = new THREE.Vector3(
+      random.range(-2.2, 2.2),
+      random.range(-2.8, 2.8),
+      random.range(-2.2, 2.2),
+    );
+    fallingBalloons.push({
+      mesh,
+      velocity,
+      angularVel,
+    });
+  };
+
+  let tryPickBalloonAtClient = function(clientX, clientY) {
+    if (!renderer || !renderCamera) {
+      return;
+    }
+    let rect = renderer.domElement.getBoundingClientRect();
+    let w = rect.width || 1;
+    let h = rect.height || 1;
+    balloonPointerNDC.x = ((clientX - rect.left) / w) * 2 - 1;
+    balloonPointerNDC.y = -((clientY - rect.top) / h) * 2 + 1;
+    balloonRaycaster.setFromCamera(balloonPointerNDC, renderCamera);
+    let pickables = collectPickableBalloonMeshes();
+    if (pickables.length === 0) {
+      return;
+    }
+    let hits = balloonRaycaster.intersectObjects(pickables, false);
+    if (hits.length > 0 && hits[0].object instanceof THREE.Mesh) {
+      startBalloonFall(hits[0].object);
+    }
+  };
+
+  let updateFallingBalloons = function(dt) {
+    if (fallingBalloons.length === 0) {
+      return;
+    }
+    let step = dt > 0.08 ? 0.08 : dt;
+    const gravity = -62;
+    const linearDamp = Math.pow(0.985, step * 60);
+    const angDamp = Math.pow(0.96, step * 60);
+    const groundClear = 4;
+    for (let i = fallingBalloons.length - 1; i >= 0; i--) {
+      let b = fallingBalloons[i];
+      let m = b.mesh;
+      b.velocity.y += gravity * step;
+      b.velocity.multiplyScalar(linearDamp);
+      fallPhysicsDelta.copy(b.velocity).multiplyScalar(step);
+      m.position.add(fallPhysicsDelta);
+      let groundY = heightmap.getHeight(m.position.x, m.position.z) + groundClear;
+      if (m.position.y <= groundY) {
+        m.position.y = groundY;
+        if (b.velocity.y < 0) {
+          b.velocity.y *= -0.22;
+        }
+        b.velocity.x *= 0.88;
+        b.velocity.z *= 0.88;
+        b.angularVel.multiplyScalar(0.94);
+      }
+      b.angularVel.multiplyScalar(angDamp);
+      m.rotation.x += b.angularVel.x * step;
+      m.rotation.y += b.angularVel.y * step;
+      m.rotation.z += b.angularVel.z * step;
+      if (m.position.y < WATER_HEIGHT - 50) {
+        scene.remove(m);
+        fallingBalloons.splice(i, 1);
+      }
     }
   };
 
@@ -1077,6 +1227,22 @@ import $ from "jquery";
     });
 
     resize();
+
+    addEvent(renderer.domElement, "click", function(e) {
+      if (e.target !== renderer.domElement) {
+        return;
+      }
+      e.preventDefault();
+      tryPickBalloonAtClient(e.clientX, e.clientY);
+    });
+    addEvent(renderer.domElement, "touchend", function(e) {
+      if (e.target !== renderer.domElement || e.changedTouches.length !== 1) {
+        return;
+      }
+      let t = e.changedTouches[0];
+      tryPickBalloonAtClient(t.clientX, t.clientY);
+    });
+
     idle();
 
     // Silly hack to prevent the perf hiccup ruining the fade effect
@@ -1131,6 +1297,8 @@ import $ from "jquery";
       lightShadowOffset.position.set(lPos.x - lPos2.x, lPos.y - lPos2.y, 0);
       renderer.shadowMap.needsUpdate = true;
     }
+
+    updateFallingBalloons(dt);
 
     if (player) {
       player.update();
